@@ -1,0 +1,5 @@
+storage:
+  path: /srv/nfs/mitchepc-225
+
+service:
+  loadBalancerIP: 10.48.228.110
