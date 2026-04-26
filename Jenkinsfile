@@ -1,72 +1,74 @@
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: flask-pv
-  labels:
-    type: nfs
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes:
-    - ReadWriteMany
-  nfs:
-    path:  /srv/nfs/mitchepc-225         #local reference change this!!!!
-    server: 10.48.228.25    #don't change this IP address.  This references the NFS server!
-  persistentVolumeReclaimPolicy: Retain
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: flask-pvc    
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Gi
-  selector:
-    matchLabels:
-      type: nfs
----      
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: flask-deployment
-  labels:
-    app: flask
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: flask
-  template:
-    metadata:
-      labels:
-        app: flask
-    spec:
-      containers:
-        - name: flask
-          image: cithit/mitchepc:latest   #<------change this!!!!!
-          ports:
-            - containerPort: 5000
-          volumeMounts:
-            - name: nfs-storage
-              mountPath: /nfs       
-      volumes:
-        - name: nfs-storage
-          persistentVolumeClaim:
-            claimName: flask-pvc    
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: flask-service
-spec:
-  type: LoadBalancer 
-  loadBalancerIP: 10.48.228.110              #<------change this!!!!                       
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 5000
-  selector:
-    app: flask
+pipeline {
+    agent any 
+
+    environment {
+        DOCKER_CREDENTIALS_ID = 'roseaw-dockerhub'  
+        DOCKER_IMAGE = 'cithit/mitchepc'                                   //<-----change this to your MiamiID!
+        IMAGE_TAG = "build-${BUILD_NUMBER}"
+        GITHUB_URL = 'https://github.com/mitchepc-del/225-lab4-1.git'     //<-----change this to match this new repository!
+        KUBECONFIG = credentials('mitchepc-225')                           //<-----change this to match your kubernetes credentials (MiamiID-225)! 
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                checkout([$class: 'GitSCM', branches: [[name: '*/main']],
+                          userRemoteConfigs: [[url: "${GITHUB_URL}"]]])
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('https://registry.hub.docker.com', 'roseaw-dockerhub') {
+                        docker.build("${DOCKER_IMAGE}:${IMAGE_TAG}")
+                }
+            }
+        }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS_ID}") {
+                        docker.image("${DOCKER_IMAGE}:${IMAGE_TAG}").push()
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Dev Environment') {
+            steps {
+                script {
+                    // This sets up the Kubernetes configuration using the specified KUBECONFIG
+                    def kubeConfig = readFile(KUBECONFIG)
+                    // This updates the deployment-dev.yaml to use the new image tag
+                    sh "sed -i 's|${DOCKER_IMAGE}:latest|${DOCKER_IMAGE}:${IMAGE_TAG}|' deployment-dev.yaml"
+                    sh "kubectl apply -f deployment-dev.yaml"
+                }
+            }
+        }
+        
+        stage('Check Kubernetes Cluster') {
+            steps {
+                script {
+                    sh "kubectl get all"
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+            slackSend color: "good", message: "Build Completed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+        }
+        unstable {
+            slackSend color: "warning", message: "Build Completed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+        }
+        failure {
+            slackSend color: "danger", message: "Build Completed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+        }
+    }
+}
